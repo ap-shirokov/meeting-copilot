@@ -7,6 +7,59 @@ import AudioToolbox
 import Darwin
 
 // Meeting Copilot: local MLX Whisper + ChatGPT subscription through localhost LiteLLM. macOS 14+.
+
+struct MeetingRecord: Codable, Identifiable {
+    var id: UUID
+    var title: String
+    var createdAt: Date
+    var updatedAt: Date
+    var transcript: String
+    var answer: String
+    var responseHistory: [String]
+    var requestCount: Int
+    var inputTokens: Int
+    var outputTokens: Int
+    var lastLatency: Double
+}
+
+enum MeetingArchive {
+    static var directory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("MeetingCopilot/Meetings", isDirectory:true)
+    }
+    static func write(_ meeting: MeetingRecord) throws {
+        try FileManager.default.createDirectory(at:directory, withIntermediateDirectories:true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(meeting)
+        try data.write(to:directory.appendingPathComponent(meeting.id.uuidString + ".json"), options:.atomic)
+    }
+    static func load() -> [MeetingRecord] {
+        let files = (try? FileManager.default.contentsOfDirectory(at:directory, includingPropertiesForKeys:nil)) ?? []
+        return files.filter { $0.pathExtension == "json" }.compactMap {
+            guard let data = try? Data(contentsOf:$0) else { return nil }
+            return try? JSONDecoder().decode(MeetingRecord.self, from:data)
+        }.sorted { $0.createdAt > $1.createdAt }
+    }
+    static func importLegacyIfNeeded() {
+        let key = "meetingCopilotLegacyTextImportedV1"
+        guard !UserDefaults.standard.bool(forKey:key) else { return }
+        let documents = FileManager.default.urls(for:.documentDirectory,in:.userDomainMask)[0]
+        let files = (try? FileManager.default.contentsOfDirectory(at:documents, includingPropertiesForKeys:nil)) ?? []
+        var allSucceeded = true
+        for url in files where url.lastPathComponent.hasPrefix("MeetingCopilot-") && url.pathExtension == "txt" {
+            guard let raw = try? String(contentsOf:url,encoding:.utf8) else { continue }
+            let numeric = url.deletingPathExtension().lastPathComponent.replacingOccurrences(of:"MeetingCopilot-",with:"")
+            let date = Double(numeric).map { Date(timeIntervalSince1970:$0) } ?? Date()
+            let entry = MeetingRecord(id:UUID(), title:"Импорт · " + DateFormatter.localizedString(from:date,dateStyle:.medium,timeStyle:.short),
+                createdAt:date, updatedAt:date, transcript:raw, answer:"", responseHistory:[],
+                requestCount:0,inputTokens:0,outputTokens:0,lastLatency:0)
+            do { try write(entry) } catch { allSucceeded = false }
+        }
+        if allSucceeded { UserDefaults.standard.set(true,forKey:key) }
+    }
+}
+
 @MainActor final class MeetingState: ObservableObject {
     @Published var active = false
     @Published var status = "Готов к запуску"
@@ -25,6 +78,70 @@ import Darwin
     @Published var showSettings = false
     @Published var proxyStatus = "Проверка подключения"
     @Published var responseHistory: [String] = []
+    @Published var meetings: [MeetingRecord] = []
+    @Published var selectedID: UUID?
+    @Published var starting = false
+
+    init() {
+        MeetingArchive.importLegacyIfNeeded()
+        meetings = MeetingArchive.load()
+        if let recent = meetings.first { apply(recent) }
+        else { newMeeting() }
+    }
+    private func apply(_ item: MeetingRecord) {
+        selectedID = item.id
+        sessionTitle = item.title
+        sessionStarted = item.createdAt
+        transcript = item.transcript
+        answer = item.answer
+        responseHistory = item.responseHistory
+        requestCount = item.requestCount
+        inputTokens = item.inputTokens
+        outputTokens = item.outputTokens
+        lastLatency = item.lastLatency
+        lastError = ""
+        status = "Открыта сохранённая встреча"
+    }
+    private func persist() {
+        guard let id = selectedID, let index = meetings.firstIndex(where:{$0.id == id}) else { return }
+        var item = meetings[index]
+        item.title = sessionTitle
+        item.updatedAt = Date()
+        item.transcript = transcript
+        item.answer = answer
+        item.responseHistory = responseHistory
+        item.requestCount = requestCount
+        item.inputTokens = inputTokens
+        item.outputTokens = outputTokens
+        item.lastLatency = lastLatency
+        do {
+            try MeetingArchive.write(item)
+            meetings[index] = item
+        } catch { status = "Ошибка локального сохранения: \(error.localizedDescription)" }
+    }
+    func rename(_ text: String) {
+        sessionTitle = text
+        persist()
+    }
+    func newMeeting() {
+        guard !starting && !busy else { return }
+        if active { stop() }
+        persist()
+        let now = Date()
+        let item = MeetingRecord(id:UUID(),
+            title:"Встреча · " + DateFormatter.localizedString(from:now,dateStyle:.short,timeStyle:.short),
+            createdAt:now,updatedAt:now,transcript:"",answer:"",responseHistory:[],
+            requestCount:0,inputTokens:0,outputTokens:0,lastLatency:0)
+        meetings.insert(item,at:0)
+        apply(item)
+        persist()
+        status = "Новая встреча готова"
+    }
+    func openMeeting(_ id: UUID) {
+        guard !active && !starting && !busy, let item = meetings.first(where:{$0.id == id}) else { return }
+        persist()
+        apply(item)
+    }
     var duration: String {
         let seconds = max(0, Int(Date().timeIntervalSince(sessionStarted)))
         return String(format: "%02d:%02d", seconds / 60, seconds % 60)
@@ -49,20 +166,20 @@ import Darwin
     private let gateway = ProcessInfo.processInfo.environment["COPILOT_LITELLM_URL"] ?? "http://127.0.0.1:4000"
 
     func start() {
-        guard !active else { return }
-        sessionStarted = Date()
+        guard !active && !starting else { return }
+        starting = true
+        let currentMeeting = selectedID
         status = "Подключение…"
-        sessionTitle = "Встреча · " + DateFormatter.localizedString(from:Date(),dateStyle:.short,timeStyle:.short)
         let t1 = Transcriber(label: "Я")
         let t2 = Transcriber(label: "Другие")
 
-        t1.onFinal = { [weak self] s in Task { @MainActor in self?.append("Я", s); self?.partialMine = "" } }
-        t2.onFinal = { [weak self] s in Task { @MainActor in self?.append("Другие", s); self?.partialOthers = "" } }
+        t1.onFinal = { [weak self] s in Task { @MainActor in guard self?.selectedID == currentMeeting else { return }; self?.append("Я", s); self?.partialMine = "" } }
+        t2.onFinal = { [weak self] s in Task { @MainActor in guard self?.selectedID == currentMeeting else { return }; self?.append("Другие", s); self?.partialOthers = "" } }
         t1.onError = { [weak self] s in Task { @MainActor in self?.status = "Микрофон: \(s)" } }
         t2.onError = { [weak self] s in Task { @MainActor in self?.status = "Системный звук: \(s)" } }
         self.mine = t1; self.others = t2
         Task {
-            do { try t1.connect(); try t2.connect() } catch { self.status = "MLX Whisper: \(error.localizedDescription)"; return }
+            do { try t1.connect(); try t2.connect() } catch { self.starting = false; self.status = "MLX Whisper: \(error.localizedDescription)"; return }
             let mic = MicCapture { data in t1.feed(data) }
             let sys = SystemCapture { data in t2.feed(data) }
             self.mic = mic; self.system = sys
@@ -70,8 +187,10 @@ import Darwin
                 try mic.start()
                 try await sys.start()
                 active = true
+                starting = false
                 status = "Идёт транскрипция (Я / Другие)"
             } catch {
+                starting = false
                 status = "Ошибка доступа или захвата: \(error.localizedDescription)"
                 stop()
                 status = "Ошибка доступа или захвата: \(error.localizedDescription)"
@@ -82,6 +201,7 @@ import Darwin
         guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         transcript += "[\(stamp)] \(who): \(message.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+        persist()
     }
     func stop() {
         mic?.stop(); mic = nil
@@ -92,6 +212,7 @@ import Darwin
         active = false
         partialMine = ""; partialOthers = ""
         status = "Остановлено"
+        persist()
     }
     func save() {
         let p = NSHomeDirectory() + "/Documents/MeetingCopilot-\(Int(Date().timeIntervalSince1970)).txt"
@@ -122,8 +243,9 @@ import Darwin
         lastError = ""
         lastResponseStatus = "Запрос…"
         let begun = Date()
+        let askedForID = selectedID
         Task {
-            defer { busy = false; lastLatency = Date().timeIntervalSince(begun) }
+            defer { busy = false; lastLatency = Date().timeIntervalSince(begun); persist() }
             do {
                 guard let url = URL(string: gateway + "/v1/responses"),
                       url.scheme == "http", url.host == "127.0.0.1" || url.host == "localhost" else {
@@ -157,6 +279,7 @@ import Darwin
                 let texts = outputs.flatMap { item in
                     (item["content"] as? [[String:Any]] ?? []).compactMap { $0["text"] as? String }
                 }
+                guard selectedID == askedForID else { return }
                 answer = texts.joined(separator:"\n")
                 if answer.isEmpty { answer = "Модель не вернула ответ." }
                 responseHistory.insert(answer, at: 0)
@@ -165,6 +288,7 @@ import Darwin
                     outputTokens += usage["output_tokens"] as? Int ?? 0
                 }
             } catch {
+                guard selectedID == askedForID else { return }
                 lastError=error.localizedDescription
                 answer="LiteLLM: \(error.localizedDescription)"
             }

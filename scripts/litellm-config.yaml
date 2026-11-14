@@ -1,0 +1,7 @@
+# ChatGPT subscription provider; no paid API fallback.
+model_list:
+  - model_name: chatgpt/gpt-6-sol
+    model_info:
+      mode: responses
+    litellm_params:
+      model: chatgpt/gpt-6-sol

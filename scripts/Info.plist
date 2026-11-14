@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>local.meetingcopilot.mvp</string>
+<key>CFBundleName</key><string>MeetingCopilot</string>
+<key>CFBundleExecutable</key><string>MeetingCopilot</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSMicrophoneUsageDescription</key><string>Для транскрипции вашей речи во время созвона</string>
+<key>NSScreenCaptureDescription</key><string>Для захвата системного звука созвона</string>
+<key>LSUIElement</key><false/>
+</dict></plist>

@@ -34,6 +34,10 @@ enum MeetingArchive {
         let data = try encoder.encode(meeting)
         try data.write(to:directory.appendingPathComponent(meeting.id.uuidString + ".json"), options:.atomic)
     }
+    static func delete(_ id: UUID) throws {
+        let url = directory.appendingPathComponent(id.uuidString + ".json")
+        try FileManager.default.removeItem(at:url)
+    }
     static func load() -> [MeetingRecord] {
         let files = (try? FileManager.default.contentsOfDirectory(at:directory, includingPropertiesForKeys:nil)) ?? []
         return files.filter { $0.pathExtension == "json" }.compactMap {
@@ -122,6 +126,36 @@ enum MeetingArchive {
     func rename(_ text: String) {
         sessionTitle = text
         persist()
+    }
+    func renameMeeting(_ id: UUID, to text: String) {
+        guard !active && !starting && !busy,
+              let index = meetings.firstIndex(where:{$0.id == id}) else { return }
+        let title = text.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        if id == selectedID {
+            rename(title)
+            return
+        }
+        var item = meetings[index]
+        item.title = title
+        item.updatedAt = Date()
+        do {
+            try MeetingArchive.write(item)
+            meetings[index] = item
+        } catch { status = "Не удалось переименовать: \(error.localizedDescription)" }
+    }
+    func deleteMeeting(_ id: UUID) {
+        guard !active && !starting && !busy,
+              let index = meetings.firstIndex(where:{$0.id == id}) else { return }
+        let wasSelected = (selectedID == id)
+        do { try MeetingArchive.delete(id) }
+        catch { status = "Не удалось удалить встречу: \(error.localizedDescription)"; return }
+        meetings.remove(at:index)
+        if wasSelected {
+            selectedID = nil
+            if let next = meetings.first { apply(next) }
+            else { newMeeting() }
+        }
     }
     func newMeeting() {
         guard !starting && !busy else { return }
@@ -520,6 +554,20 @@ struct DashboardView:View {
     @State private var selectedTab = 0
     @State private var secondsTick = 0
     @State private var meetingSearch = ""
+    @State private var meetingToRename: UUID?
+    @State private var renameDraft = ""
+    @State private var showRenamePrompt = false
+    @State private var meetingToDelete: UUID?
+    @State private var showDeletePrompt = false
+    private func prepareRename(_ item: MeetingRecord) {
+        meetingToRename = item.id
+        renameDraft = item.title
+        showRenamePrompt = true
+    }
+    private func prepareDelete(_ item: MeetingRecord) {
+        meetingToDelete = item.id
+        showDeletePrompt = true
+    }
     private var matchingMeetings: [MeetingRecord] {
         let query = meetingSearch.trimmingCharacters(in:.whitespacesAndNewlines)
         return state.meetings.filter {
@@ -547,6 +595,29 @@ struct DashboardView:View {
         .frame(minWidth:960,minHeight:620)
         .preferredColorScheme(.dark)
         .onAppear { state.proxyStatus = "LiteLLM · localhost:4000" }
+        .alert("Переименовать встречу",isPresented:$showRenamePrompt) {
+            TextField("Название встречи",text:$renameDraft)
+            Button("Отмена",role:.cancel) { meetingToRename = nil }
+            Button("Сохранить") {
+                if let id = meetingToRename { state.renameMeeting(id,to:renameDraft) }
+                meetingToRename = nil
+            }
+        } message: {
+            Text("Новое название будет сохранено локально.")
+        }
+        .confirmationDialog(
+            "Удалить встречу?",
+            isPresented:$showDeletePrompt,
+            titleVisibility:.visible
+        ) {
+            Button("Удалить встречу",role:.destructive) {
+                if let id = meetingToDelete { state.deleteMeeting(id) }
+                meetingToDelete = nil
+            }
+            Button("Отмена",role:.cancel) { meetingToDelete = nil }
+        } message: {
+            Text("Транскрипт и сохранённые ответы GPT будут удалены с этого Mac. Отменить удаление нельзя.")
+        }
     }
 
     private var sidebar:some View {
@@ -597,9 +668,16 @@ struct DashboardView:View {
                             .frame(maxWidth:.infinity,alignment:.leading)
                             .padding(10)
                             .background(item.id == state.selectedID ? Palette.elevated : Color.clear,in:RoundedRectangle(cornerRadius:10))
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .disabled((state.active || state.starting || state.busy) && item.id != state.selectedID)
+                        .contextMenu {
+                            Button("Открыть",systemImage:"arrow.up.right.square") { state.openMeeting(item.id) }
+                            Button("Переименовать",systemImage:"pencil") { prepareRename(item) }
+                            Divider()
+                            Button("Удалить",systemImage:"trash",role:.destructive) { prepareDelete(item) }
+                        }
                     }
                     if matchingMeetings.isEmpty {
                         Text("Ничего не найдено").font(.system(size:12)).foregroundStyle(Palette.secondary)

@@ -6,7 +6,7 @@ APP="$ROOT/dist/Meeting Copilot.app"
 CONTENTS="$APP/Contents"
 rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$ROOT/dist"
-xcrun swiftc -O -swift-version 5 -target arm64-apple-macos14.0 \
+xcrun swiftc -parse-as-library -O -swift-version 5 -target arm64-apple-macos14.0 \
     -framework SwiftUI -framework AppKit -framework AVFoundation \
     -framework ScreenCaptureKit -framework CoreMedia -framework AudioToolbox \
     Sources/main.swift -o "$CONTENTS/MacOS/MeetingCopilot"

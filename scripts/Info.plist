@@ -4,6 +4,7 @@
 <key>CFBundleIdentifier</key><string>local.meetingcopilot.mvp</string>
 <key>CFBundleName</key><string>MeetingCopilot</string>
 <key>CFBundleExecutable</key><string>MeetingCopilot</string>
+<key>CFBundleIconFile</key><string>MeetingCopilot.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSMicrophoneUsageDescription</key><string>Для транскрипции вашей речи во время созвона</string>

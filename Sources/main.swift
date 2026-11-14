@@ -248,10 +248,60 @@ enum MeetingArchive {
         status = "Остановлено"
         persist()
     }
+    // The private JSON meeting archive remains separate from user-selected TXT exports.
+    private static let exportFolderKey = "MeetingCopilotExportDirectory"
+
+    var exportFolder: URL {
+        if let path = UserDefaults.standard.string(forKey:Self.exportFolderKey),
+           FileManager.default.fileExists(atPath:path) {
+            return URL(fileURLWithPath:path, isDirectory:true)
+        }
+        return FileManager.default.urls(for:.documentDirectory,in:.userDomainMask)[0]
+    }
+    var exportFolderLabel: String { exportFolder.path }
+
+    func chooseExportFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Папка для экспорта встреч"
+        panel.prompt = "Выбрать папку"
+        panel.message = "Новые TXT-файлы будут предлагаться для сохранения в эту папку."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = exportFolder
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+        UserDefaults.standard.set(directory.path,forKey:Self.exportFolderKey)
+        status = "Папка экспорта: \(directory.path)"
+        objectWillChange.send()
+    }
+    private func suggestedExportName() -> String {
+        var name = sessionTitle.trimmingCharacters(in:.whitespacesAndNewlines)
+        let forbidden = CharacterSet(charactersIn:"/:\\\\?*\\\"<>|").union(.controlCharacters)
+        name = name.components(separatedBy:forbidden).joined(separator:"-")
+        name = name.replacingOccurrences(of:"\\n",with:" ")
+        name = name.replacingOccurrences(of:"\\r",with:" ")
+        while name.contains("  ") { name = name.replacingOccurrences(of:"  ",with:" ") }
+        name = String(name.prefix(120)).trimmingCharacters(in:.whitespacesAndNewlines)
+        if name.isEmpty || name == "." || name == ".." { name = "Встреча" }
+        return name + ".txt"
+    }
     func save() {
-        let p = NSHomeDirectory() + "/Documents/MeetingCopilot-\(Int(Date().timeIntervalSince1970)).txt"
-        do { try transcript.write(toFile: p, atomically: true, encoding: .utf8); status = "Сохранено: \(p)" }
-        catch { status = "Не удалось сохранить: \(error.localizedDescription)" }
+        let panel = NSSavePanel()
+        panel.title = "Экспорт транскрипта"
+        panel.prompt = "Сохранить"
+        panel.message = "Имя файла соответствует названию выбранной встречи."
+        panel.nameFieldStringValue = suggestedExportName()
+        panel.directoryURL = exportFolder
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try transcript.write(to:url,atomically:true,encoding:.utf8)
+            UserDefaults.standard.set(url.deletingLastPathComponent().path,forKey:Self.exportFolderKey)
+            status = "Сохранено: \(url.path)"
+            objectWillChange.send()
+        } catch { status = "Не удалось сохранить: \(error.localizedDescription)" }
     }
     static func readMasterKey() -> String? {
         if let value = ProcessInfo.processInfo.environment["LITELLM_MASTER_KEY"], !value.isEmpty { return value }
@@ -684,6 +734,24 @@ struct DashboardView:View {
                             .padding(.vertical,12)
                     }
                 }
+            }
+            Divider().overlay(.white.opacity(0.1))
+            VStack(alignment:.leading,spacing:7) {
+                Text("ЭКСПОРТ ТРАНСКРИПТОВ")
+                    .font(.system(size:10,weight:.bold)).tracking(1.1)
+                    .foregroundStyle(Palette.secondary)
+                Button { state.chooseExportFolder() } label: {
+                    Label("Выбрать папку…",systemImage:"folder")
+                        .font(.system(size:12))
+                        .frame(maxWidth:.infinity,alignment:.leading)
+                }
+                .buttonStyle(.plain).foregroundStyle(Palette.accent)
+                Text(state.exportFolderLabel)
+                    .font(.system(size:10))
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .foregroundStyle(Palette.secondary)
+                    .help(state.exportFolderLabel)
             }
             Divider().overlay(.white.opacity(0.1))
             VStack(alignment:.leading,spacing:8) {

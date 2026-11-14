@@ -197,6 +197,10 @@ final class Transcriber: @unchecked Sendable {
         let py = env["COPILOT_PYTHON"] ?? NSHomeDirectory() + "/Documents/Whisper/.venv/bin/python"
         let worker = env["COPILOT_WORKER"] ?? Bundle.main.path(forResource:"whisper_worker",ofType:"py") ?? (env["COPILOT_ROOT"] ?? "") + "/scripts/whisper_worker.py"
         p.executableURL = URL(fileURLWithPath:py)
+        // Finder-launched apps do not inherit Homebrew PATH from the interactive shell.
+        var workerEnvironment = env
+        workerEnvironment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" + (env["PATH"] ?? "")
+        p.environment = workerEnvironment
         p.arguments = ["-u",worker]
         let input=Pipe(), output=Pipe(), errors=Pipe()
         p.standardInput=input; p.standardOutput=output; p.standardError=errors

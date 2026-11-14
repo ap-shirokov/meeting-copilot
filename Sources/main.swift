@@ -519,6 +519,15 @@ struct DashboardView:View {
     @ObservedObject var state:MeetingState
     @State private var selectedTab = 0
     @State private var secondsTick = 0
+    @State private var meetingSearch = ""
+    private var matchingMeetings: [MeetingRecord] {
+        let query = meetingSearch.trimmingCharacters(in:.whitespacesAndNewlines)
+        return state.meetings.filter {
+            query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) ||
+            $0.transcript.localizedCaseInsensitiveContains(query) ||
+            $0.responseHistory.contains(where:{$0.localizedCaseInsensitiveContains(query)})
+        }.sorted { $0.createdAt > $1.createdAt }
+    }
     var body: some View {
         HStack(spacing:0) {
             sidebar
@@ -541,7 +550,7 @@ struct DashboardView:View {
     }
 
     private var sidebar:some View {
-        VStack(alignment:.leading,spacing:22) {
+        VStack(alignment:.leading,spacing:14) {
             HStack(spacing:11) {
                 Image(systemName:"waveform.path").font(.system(size:19,weight:.semibold))
                     .frame(width:38,height:38).background(Palette.accent.opacity(0.18),in:RoundedRectangle(cornerRadius:11))
@@ -551,25 +560,65 @@ struct DashboardView:View {
                     Text("COPILOT").font(.system(size:10,weight:.semibold,design:.rounded)).tracking(3).foregroundStyle(Palette.accent)
                 }
             }.padding(.top,9)
-            VStack(spacing:7) {
-                sidebarItem("Рабочая встреча",icon:"waveform",selected:true)
-                sidebarItem("Транскрипт",icon:"text.bubble",selected:false)
+            Button { state.newMeeting() } label: {
+                Label("Новая встреча",systemImage:"plus.circle.fill")
+                    .frame(maxWidth:.infinity,alignment:.leading)
+            }
+            .buttonStyle(.borderedProminent).tint(Palette.accent)
+            .disabled(state.starting || state.busy)
+            Divider().overlay(.white.opacity(0.1))
+            HStack {
+                Text("ИСТОРИЯ ВСТРЕЧ").font(.system(size:10,weight:.bold)).tracking(1.2).foregroundStyle(Palette.secondary)
+                Spacer()
+                Text(String(state.meetings.count)).font(.system(size:11)).foregroundStyle(Palette.secondary)
+            }
+            TextField("Поиск по встречам и тексту…",text:$meetingSearch)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size:12))
+            ScrollView {
+                LazyVStack(alignment:.leading,spacing:6) {
+                    ForEach(matchingMeetings) { item in
+                        Button { state.openMeeting(item.id) } label: {
+                            VStack(alignment:.leading,spacing:4) {
+                                HStack(spacing:6) {
+                                    Image(systemName:item.id == state.selectedID ? "waveform" : "text.bubble")
+                                        .foregroundStyle(item.id == state.selectedID ? Palette.accent : Palette.secondary)
+                                    Text(item.title.isEmpty ? "Без названия" : item.title)
+                                        .font(.system(size:12,weight:.semibold))
+                                        .lineLimit(2)
+                                }
+                                Text(DateFormatter.localizedString(from:item.createdAt,dateStyle:.short,timeStyle:.short))
+                                    .font(.system(size:10)).foregroundStyle(Palette.secondary)
+                                Text(item.transcript.isEmpty ? "Нет реплик" : String(item.transcript.suffix(110)))
+                                    .font(.system(size:10))
+                                    .foregroundStyle(Palette.secondary)
+                                    .lineLimit(2)
+                            }
+                            .frame(maxWidth:.infinity,alignment:.leading)
+                            .padding(10)
+                            .background(item.id == state.selectedID ? Palette.elevated : Color.clear,in:RoundedRectangle(cornerRadius:10))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled((state.active || state.starting || state.busy) && item.id != state.selectedID)
+                    }
+                    if matchingMeetings.isEmpty {
+                        Text("Ничего не найдено").font(.system(size:12)).foregroundStyle(Palette.secondary)
+                            .padding(.vertical,12)
+                    }
+                }
             }
             Divider().overlay(.white.opacity(0.1))
-            VStack(alignment:.leading,spacing:10) {
+            VStack(alignment:.leading,spacing:8) {
                 Text("ПОДКЛЮЧЕНИЯ").font(.system(size:10,weight:.bold)).tracking(1.5).foregroundStyle(Palette.secondary)
                 connectionLabel("MLX Whisper",icon:"waveform.path",color:Palette.accent)
                 connectionLabel("LiteLLM · GPT",icon:"sparkles",color:Color(red:0.69,green:0.72,blue:1))
             }
-            Spacer()
-            VStack(alignment:.leading,spacing:6) {
-                Text("PRIVATE BY DESIGN").font(.system(size:10,weight:.bold)).tracking(1).foregroundStyle(Palette.secondary)
-                Text("Аудио обрабатывается локально. Текст запросов передаётся в подключённую GPT-модель.")
-                    .font(.system(size:11)).foregroundStyle(Palette.secondary).fixedSize(horizontal:false,vertical:true)
-            }
+            Text("Встречи хранятся локально на Mac. В GPT уходит текст только при запросе.")
+                .font(.system(size:10)).foregroundStyle(Palette.secondary)
+                .fixedSize(horizontal:false,vertical:true)
         }
-        .padding(18)
-        .frame(width:208)
+        .padding(16)
+        .frame(width:252)
         .frame(maxHeight:.infinity,alignment:.topLeading)
         .background(Palette.panel)
     }
@@ -592,7 +641,8 @@ struct DashboardView:View {
     private var header:some View {
         HStack(spacing:15) {
             VStack(alignment:.leading,spacing:5) {
-                Text(state.sessionTitle).font(.system(size:21,weight:.semibold))
+                TextField("Название встречи",text:Binding(get:{state.sessionTitle},set:{state.rename($0)}))
+                    .textFieldStyle(.plain).font(.system(size:21,weight:.semibold))
                 HStack(spacing:7) {
                     Circle().fill(state.active ? Palette.accent : Palette.secondary).frame(width:7,height:7)
                     Text(state.status).font(.system(size:12)).foregroundStyle(Palette.secondary).lineLimit(1)
@@ -608,6 +658,7 @@ struct DashboardView:View {
                 Label(state.active ? "Остановить" : "Начать запись",systemImage:state.active ? "stop.fill" : "record.circle")
                     .frame(minWidth:125)
             }.buttonStyle(.borderedProminent).tint(state.active ? .red : Palette.accent)
+                .disabled(state.starting)
         }
         .padding(.horizontal,24).padding(.vertical,18)
         .background(Palette.panel.opacity(0.6))
@@ -640,7 +691,7 @@ struct DashboardView:View {
                         if !state.partialOthers.isEmpty { TranscriptBubble(speaker:"Другие",time:"Сейчас",content:state.partialOthers) }
                     }.padding(.horizontal,22).padding(.bottom,20)
                 }
-                .onChange(of:state.utterances.count) { newCount in
+                .onChange(of:state.utterances.count) { _, newCount in
                     if newCount > 0 { withAnimation { proxy.scrollTo(newCount - 1,anchor:.bottom) } }
                 }
             }

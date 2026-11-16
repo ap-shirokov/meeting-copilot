@@ -5,7 +5,7 @@ import Foundation
 final class PCMTrack: @unchecked Sendable {
     private let queue: DispatchQueue
     private let file: FileHandle
-    private var dataBytes: UInt64
+    private var dataBytes: UInt64 = 0
     private var closed = false
 
     init(url: URL, name: String) throws {

@@ -27,6 +27,13 @@ enum MeetingArchive {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("MeetingCopilot/Meetings", isDirectory:true)
     }
+    static func audioDirectory(_ id: UUID) -> URL {
+        directory.appendingPathComponent("Recordings",isDirectory:true)
+            .appendingPathComponent(id.uuidString,isDirectory:true)
+    }
+    static func audioURL(_ id: UUID, channel: String) -> URL {
+        audioDirectory(id).appendingPathComponent(channel + ".wav")
+    }
     static func write(_ meeting: MeetingRecord) throws {
         try FileManager.default.createDirectory(at:directory, withIntermediateDirectories:true)
         let encoder = JSONEncoder()
@@ -37,6 +44,11 @@ enum MeetingArchive {
     static func delete(_ id: UUID) throws {
         let url = directory.appendingPathComponent(id.uuidString + ".json")
         try FileManager.default.removeItem(at:url)
+        // Keep meeting JSON and its two audio tracks in the same lifecycle.
+        let audio = audioDirectory(id)
+        if FileManager.default.fileExists(atPath:audio.path) {
+            try FileManager.default.removeItem(at:audio)
+        }
     }
     static func load() -> [MeetingRecord] {
         let files = (try? FileManager.default.contentsOfDirectory(at:directory, includingPropertiesForKeys:nil)) ?? []
@@ -77,6 +89,8 @@ enum MeetingArchive {
     private var system: SystemCapture?
     private var mine: Transcriber?
     private var others: Transcriber?
+    private var audioRecorder: MeetingAudioRecorder?
+    @Published var audioRevision = 0
     private var sessionStarted = Date()
     @Published var sessionTitle = "Новая встреча"
     @Published var showSettings = false
@@ -214,8 +228,28 @@ enum MeetingArchive {
         self.mine = t1; self.others = t2
         Task {
             do { try t1.connect(); try t2.connect() } catch { self.starting = false; self.status = "MLX Whisper: \(error.localizedDescription)"; return }
-            let mic = MicCapture { data in t1.feed(data) }
-            let sys = SystemCapture { data in t2.feed(data) }
+            guard let meetingID = currentMeeting else {
+                starting = false
+                status = "Сначала создайте встречу"
+                return
+            }
+            let recorder: MeetingAudioRecorder
+            do { recorder = try MeetingAudioRecorder(meetingID:meetingID) }
+            catch {
+                starting = false
+                status = "Не удалось начать аудиозапись: \(error.localizedDescription)"
+                t1.close(); t2.close()
+                return
+            }
+            audioRecorder = recorder
+            let mic = MicCapture { data in
+                recorder.appendMicrophone(data)
+                t1.feed(data)
+            }
+            let sys = SystemCapture { data in
+                recorder.appendSystem(data)
+                t2.feed(data)
+            }
             self.mic = mic; self.system = sys
             do {
                 try mic.start()
@@ -243,11 +277,81 @@ enum MeetingArchive {
         Task { await old?.stop() }
         mine?.close(); others?.close()
         mine = nil; others = nil
+        audioRecorder?.finish()
+        audioRecorder = nil
+        audioRevision += 1
         active = false
         partialMine = ""; partialOthers = ""
         status = "Остановлено"
         persist()
     }
+    var hasMicrophoneRecording: Bool {
+        guard let id = selectedID else { return false }
+        return FileManager.default.fileExists(atPath:MeetingArchive.audioURL(id,channel:"microphone").path)
+    }
+    var hasSystemRecording: Bool {
+        guard let id = selectedID else { return false }
+        return FileManager.default.fileExists(atPath:MeetingArchive.audioURL(id,channel:"system").path)
+    }
+    func openRecording(_ channel:String) {
+        guard !active, !starting, let id = selectedID else { return }
+        let file = MeetingArchive.audioURL(id,channel:channel)
+        guard FileManager.default.fileExists(atPath:file.path) else {
+            status = "Запись не найдена для выбранной встречи"
+            return
+        }
+        NSWorkspace.shared.open(file)
+    }
+    func showRecordingFolder() {
+        guard !active, !starting, let id = selectedID else { return }
+        let directory = MeetingArchive.audioDirectory(id)
+        guard FileManager.default.fileExists(atPath:directory.path) else {
+            status = "Для этой встречи ещё нет аудиозаписи"
+            return
+        }
+        NSWorkspace.shared.open(directory)
+    }
+    func exportAudio() {
+        guard !active, !starting, let id = selectedID else { return }
+        let sources = [
+            ("microphone","Микрофон"),
+            ("system","Собеседники")
+        ].filter { FileManager.default.fileExists(atPath:MeetingArchive.audioURL(id,channel:$0.0).path) }
+        guard !sources.isEmpty else {
+            status = "Для этой встречи нет аудиозаписи"
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.title = "Экспорт аудио встречи"
+        panel.prompt = "Экспортировать WAV"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = exportFolder
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+
+        let base = String(suggestedExportName().dropLast(4))
+        do {
+            for (key,label) in sources {
+                let source = MeetingArchive.audioURL(id,channel:key)
+                let dest = directory.appendingPathComponent(base + " — " + label + ".wav")
+                // Do not silently overwrite an existing export.
+                if FileManager.default.fileExists(atPath:dest.path) {
+                    throw NSError(domain:"MeetingAudio",code:4,userInfo:[
+                        NSLocalizedDescriptionKey:"Файл уже существует: \(dest.lastPathComponent)"
+                    ])
+                }
+                try FileManager.default.copyItem(at:source,to:dest)
+            }
+            UserDefaults.standard.set(directory.path,forKey:Self.exportFolderKey)
+            status = "Аудио сохранено: \(directory.path)"
+            objectWillChange.send()
+        } catch {
+            status = "Ошибка экспорта аудио: \(error.localizedDescription)"
+        }
+    }
+
     // The private JSON meeting archive remains separate from user-selected TXT exports.
     private static let exportFolderKey = "MeetingCopilotExportDirectory"
 
@@ -797,9 +901,20 @@ struct DashboardView:View {
             Spacer()
             Text("\(state.inputTokens + state.outputTokens) токенов")
                 .font(.system(size:12,design:.monospaced)).foregroundStyle(Palette.secondary)
-            Button { state.save() } label: {
-                Label("Экспорт",systemImage:"square.and.arrow.up")
-            }.buttonStyle(.bordered)
+            Menu {
+                Button("Экспорт транскрипта (TXT)",systemImage:"doc.text") { state.save() }
+                Button("Экспорт аудио (WAV)",systemImage:"square.and.arrow.down") { state.exportAudio() }
+                    .disabled(state.active || state.starting || !(state.hasMicrophoneRecording || state.hasSystemRecording))
+                Divider()
+                Button("Прослушать микрофон",systemImage:"mic") { state.openRecording("microphone") }
+                    .disabled(state.active || state.starting || !state.hasMicrophoneRecording)
+                Button("Прослушать собеседников",systemImage:"speaker.wave.2") { state.openRecording("system") }
+                    .disabled(state.active || state.starting || !state.hasSystemRecording)
+                Button("Показать аудио в Finder",systemImage:"folder") { state.showRecordingFolder() }
+                    .disabled(state.active || state.starting || !(state.hasMicrophoneRecording || state.hasSystemRecording))
+            } label: {
+                Label("Экспорт и аудио",systemImage:"square.and.arrow.up")
+            }.menuStyle(.borderedButton)
             Button { state.active ? state.stop() : state.start() } label: {
                 Label(state.active ? "Остановить" : "Начать запись",systemImage:state.active ? "stop.fill" : "record.circle")
                     .frame(minWidth:125)
@@ -843,7 +958,7 @@ struct DashboardView:View {
             }
             HStack(spacing:8) {
                 Image(systemName:"lock.shield").foregroundStyle(Palette.accent)
-                Text("Микрофон и звук системы разделены на два канала")
+                Text("Микрофон и собеседники записываются локально в отдельные WAV-файлы")
                     .font(.system(size:11)).foregroundStyle(Palette.secondary)
                 Spacer()
             }.padding(15).background(Palette.panel)

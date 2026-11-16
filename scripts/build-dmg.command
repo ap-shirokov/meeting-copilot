@@ -9,7 +9,7 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$ROOT/dist"
 xcrun swiftc -parse-as-library -O -swift-version 5 -target arm64-apple-macos14.0 \
     -framework SwiftUI -framework AppKit -framework AVFoundation \
     -framework ScreenCaptureKit -framework CoreMedia -framework AudioToolbox \
-    Sources/main.swift -o "$CONTENTS/MacOS/MeetingCopilot"
+    Sources/main.swift Sources/MeetingAudioRecorder.swift -o "$CONTENTS/MacOS/MeetingCopilot"
 # Render the app icon at 1024 px, then build a multi-resolution .icns.
 mkdir -p "$ROOT/dist/AppIcon.iconset"
 xcrun swift scripts/generate-icon.swift "$ROOT/dist/MeetingCopilotIcon.png"
